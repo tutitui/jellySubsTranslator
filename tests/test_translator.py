@@ -116,6 +116,26 @@ class QueueTests(unittest.TestCase):
                 result=server.models(provider)
             self.assertTrue(result['live']);self.assertIn(expected,result['models'])
 
+    def test_folder_source_jobs_are_distinct_and_keep_autosave(self):
+        common={'srt':SRT,'item_id':'11111111-1111-1111-1111-111111111111','target':'es','title':'Movie','auto_save':True}
+        a=server.create_job(dict(common,source_file_id='a'*64))
+        b=server.create_job(dict(common,source_file_id='b'*64))
+        self.assertNotEqual(a['id'],b['id']);self.assertEqual(a['auto_save'],1)
+        self.assertEqual(a['source_file_id'],'a'*64)
+        self.assertEqual(server.create_job(dict(common,source_file_id='a'*64))['id'],a['id'])
+
+    def test_migration_preserves_existing_jobs(self):
+        job=self.job();server.init();row=server.get_job(job['id'])
+        self.assertEqual(row['source_file_id'],'');self.assertEqual(row['auto_save'],0)
+        self.assertEqual(row['state'],'paused')
+
+    def test_save_error_is_retryable_without_retranslation(self):
+        job=server.create_job({'srt':SRT,'item_id':'11111111-1111-1111-1111-111111111111','target':'es','source_file_id':'a'*64,'auto_save':True})
+        with closing(server.connect()) as c,c:c.execute("UPDATE jobs SET state='completed' WHERE id=?",(job['id'],))
+        server.action(job['id'],'save-error');self.assertTrue(server.get_job(job['id'])['error'])
+        same=server.create_job({'srt':SRT,'item_id':'11111111-1111-1111-1111-111111111111','target':'es','source_file_id':'a'*64,'auto_save':True})
+        self.assertEqual(same['id'],job['id']);self.assertEqual(same['error'],'');self.assertEqual(same['state'],'completed')
+
     def test_private_key_file_permissions(self):
         self.assertEqual((server.DATA/'settings.json').stat().st_mode & 0o777,0o600)
 

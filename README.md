@@ -9,7 +9,9 @@ Select a provider, choose a model from its dropdown, enter your own API key, and
 ## Features
 
 - **Translate subtitles** inside Jellyfin Web’s existing **Edit subtitles** dialog.
-- One target-language selector and Translate button per subtitle file.
+- One target-language selector and Translate button per subtitle file, with no configuration or job-management clutter in the movie panel.
+- Automatic discovery of subtitle files in the selected video’s folder, including files Jellyfin has not indexed.
+- Automatic saving and refresh after a movie-level translation completes, even after closing the browser.
 - Provider selector with a provider-dependent model selector.
 - Live model discovery using your saved credentials, plus custom model IDs.
 - Separate saved API keys for each provider; keys are never returned to the browser.
@@ -19,7 +21,7 @@ Select a provider, choose a model from its dropdown, enter your own API key, and
 - Validation that rejects missing, duplicate, empty, or malformed translated cues.
 - Persistent job queue, progress, cancellation, and resumable checkpoints.
 - Duplicate-job detection to avoid translating the same source/settings twice.
-- Completed SRT download or **Save to library** through Jellyfin’s subtitle API.
+- Completed SRT download and job history in the dashboard; movie-level translations save automatically through Jellyfin’s subtitle API.
 - Shared command-line translator with no third-party Python dependencies.
 
 ## How it works
@@ -30,10 +32,10 @@ flowchart LR
     B -->|Private shared token| C[Python translation worker]
     C --> D[Selected AI provider]
     C --> E[(Private settings and job checkpoints)]
-    A -->|Save completed SRT| F[Jellyfin subtitle upload and refresh]
+    B -->|Automatically save completed movie jobs| F[Jellyfin subtitle upload and refresh]
 ```
 
-The plugin adds a dashboard page and authenticated API bridge. The worker stores jobs and calls the selected provider. It has no media-directory mounts and no published host port. A completed subtitle is saved to the media library when you click **Save to library**; saving does not depend on a separate Jellyfin API key.
+The plugin adds a dashboard page and authenticated API bridge. The worker stores jobs and calls the selected provider. It has no media-directory mounts and no published host port. Movie-level jobs are saved automatically through Jellyfin’s subtitle API by a background plugin service. Dashboard-created jobs retain the manual **Save to library** action. Saving does not depend on a separate Jellyfin API key.
 
 ## Requirements
 
@@ -119,14 +121,16 @@ The worker must be reachable from Jellyfin as `http://subtitle-translator:8788`.
 ### 5. Install the plugin and recreate Jellyfin
 
 ```sh
-docker exec jellyfin mkdir -p '/config/data/plugins/Subtitle Translator_1.0.0.0'
+docker exec jellyfin mkdir -p '/config/data/plugins/Subtitle Translator_1.1.0.0'
 docker cp artifacts/Jellyfin.Plugin.SubtitleTranslator.dll \
-  'jellyfin:/config/data/plugins/Subtitle Translator_1.0.0.0/'
+  'jellyfin:/config/data/plugins/Subtitle Translator_1.1.0.0/'
 docker cp artifacts/Jellyfin.Plugin.SubtitleTranslator.deps.json \
-  'jellyfin:/config/data/plugins/Subtitle Translator_1.0.0.0/'
+  'jellyfin:/config/data/plugins/Subtitle Translator_1.1.0.0/'
 docker cp artifacts/meta.json \
-  'jellyfin:/config/data/plugins/Subtitle Translator_1.0.0.0/'
+  'jellyfin:/config/data/plugins/Subtitle Translator_1.1.0.0/'
 ```
+
+When upgrading, move the previous Subtitle Translator plugin version outside Jellyfin’s plugins directory before restarting, keeping it as a rollback copy. Do not leave multiple active copies of the same plugin.
 
 Recreate Jellyfin from **its existing Compose project** so it receives the new `env_file`:
 
@@ -173,10 +177,15 @@ This project does not install Ollama or download models. Model quality, speed, a
 
 1. Open the video’s **More → Edit subtitles** menu.
 2. Click **Translate subtitles**, below the existing subtitle search controls.
-3. The panel lists existing external subtitle files first, followed by embedded tracks. Image tracks are listed but cannot be translated without OCR.
-4. Select a target language beside the desired source subtitle and click **Translate**.
-5. Confirm the provider/model and cue count. The row shows job progress, cancellation, and retry controls.
-6. When complete, click **Save to movie folder** to upload the SRT through Jellyfin and refresh the item. Reopen the subtitle editor to see the new file.
+3. The plugin identifies the selected video’s folder and lists its subtitle files. Each row contains only the filename and detected source language, a target-language dropdown, and **Translate**.
+4. Select a target language beside the desired subtitle and click **Translate**. Translation starts using the provider, key, and model saved in the plugin configuration.
+5. The button changes to **Translating…**, then **Translated** after the completed SRT has been saved automatically beside the movie and Jellyfin has been refreshed. No separate Save button or configuration controls appear here.
+
+The file list scans the movie folder directly, rather than depending only on indexed Jellyfin tracks. Supported discovery extensions are `.srt`, `.ass`, `.ssa`, `.vtt`, `.ttml`, `.sub`, `.idx`, `.sup`, and `.smi`. SRT is read directly; ASS, SSA, VTT, and TTML are converted to SRT with the server’s FFmpeg. Other formats are listed with a disabled Translate button until converted/OCRed. Symbolic-link files are excluded. Discovery covers the folder’s immediate files; embedded tracks and files inside subdirectories are not included in this simple movie panel.
+
+Source language is inferred from filename tags such as `.en`, `.eng`, `.es`, `.pt-BR`, and `.pt-PT`, with Jellyfin metadata as a fallback. Untagged/unrecognized sources display **Unknown language** and are auto-detected by the translation model when translated. No extra provider call is made just to label files.
+
+Translation details, cancellation, and retry controls remain in the plugin dashboard. Errors appear in the button tooltip and dashboard history. A completed subtitle that failed to save can be retried by clicking Translate again; its translation is reused. Existing subtitles are preserved by Jellyfin’s collision-safe upload naming.
 
 ![Subtitle files with target-language selectors and translation controls](docs/movie-editor.png)
 
@@ -228,7 +237,7 @@ The CLI writes language-tagged output such as `movie.pt-BR.srt` and refuses to o
 - Jobs and input/output text persist in `runtime/jobs.db`. Back up or remove that private data according to your needs.
 - The worker has no host-published port or media mount. It uses a shared token for the internal bridge and runs without Linux capabilities on a read-only root filesystem.
 - AI translation can make semantic errors. Review important subtitles. The code validates structure and completeness, not linguistic accuracy.
-- PGS, VobSub, and other image subtitles are excluded. Audio transcription, OCR, live translation, normal-viewer controls, and automatic import without clicking **Save to library** are not implemented.
+- PGS, VobSub, and other image subtitles are excluded. Audio transcription, OCR, live translation, and normal-viewer controls are not implemented. Movie-level jobs save automatically; dashboard jobs still offer manual import.
 
 ## Development and testing
 
@@ -253,7 +262,7 @@ Tests cover provider request/response formats, key redaction, invalid responses,
 
 For the optional browser harness, first prepare the same disposable integration environment, install `playwright-core` as a development-only dependency, then run `node tests/browser_smoke.cjs`. It uses Chrome at `/usr/bin/google-chrome`; set `CHROME_PATH` for another installation. Browser job submission is mocked.
 
-The initial implementation was also checked in Chrome for provider/model selection, movie search, subtitle-track selection, and **Edit subtitles → Translate subtitles**. The editor test verified file rows and submitted the selected source and target language to a mocked job endpoint. Real provider inference has not been exercised by these automated tests.
+The implementation is also checked in Chrome for provider/model selection, movie search, subtitle-track selection, and **Edit subtitles → Translate subtitles**. The editor test verifies that each row contains only the filename/language, a target dropdown, and one Translate button, then submits the selected unindexed folder file and target language to a mocked job endpoint. `tests/folder_integration.py` additionally verifies unindexed folder-file discovery, language labels, VTT conversion, symbolic-link exclusion, and automatic saving of a mocked completed translation while preserving its source. Real provider inference has not been exercised by these automated tests.
 
 ## Troubleshooting
 
