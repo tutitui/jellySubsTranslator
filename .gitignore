@@ -218,3 +218,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local deployment and private translation data
+runtime/
+refs/
+artifacts/
+integration/
+.env
+*.progress.json
+*.db
+*.db-shm
+*.db-wal
+**/bin/
+**/obj/
+node_modules/

@@ -1,0 +1,13 @@
+{
+  "category": "Administration",
+  "description": "Translate subtitle tracks with OpenAI, Gemini, Anthropic, Meta Muse, Ollama, or a custom API.",
+  "guid": "22b284d5-809f-42e2-b6e4-c6432af82c72",
+  "name": "Subtitle Translator",
+  "overview": "Manage resumable AI subtitle translation jobs inside Jellyfin.",
+  "owner": "Local",
+  "targetAbi": "12.4.0.0",
+  "version": "1.0.0.0",
+  "status": "Active",
+  "autoUpdate": false,
+  "assemblies": []
+}
