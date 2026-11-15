@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Jellyfin.Plugin.SubtitleTranslator</AssemblyName>
+    <RootNamespace>Jellyfin.Plugin.SubtitleTranslator</RootNamespace>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <Reference Include="MediaBrowser.Common"><HintPath>../refs/MediaBrowser.Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="MediaBrowser.Model"><HintPath>../refs/MediaBrowser.Model.dll</HintPath><Private>false</Private></Reference>
+    <EmbeddedResource Include="dashboard.html" />
+  </ItemGroup>
+</Project>

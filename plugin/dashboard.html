@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Subtitle Translator</title></head>
+<body>
+<style>#subtitleTranslatorPage [hidden]{display:none!important}</style>
+<div id="subtitleTranslatorPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-select,emby-checkbox">
+  <div data-role="content"><div class="content-primary" style="max-width:1000px">
+    <h1>Subtitle Translator</h1>
+    <p>Translate a subtitle track, review its progress, then save it to your Jellyfin library. Original subtitles stay intact.</p>
+    <details open><summary style="cursor:pointer;font-size:1.25em;margin:1em 0">Provider settings</summary>
+      <form id="stSettings">
+        <div class="selectContainer"><label class="selectLabel" for="stProvider">AI provider</label><select is="emby-select" id="stProvider"></select></div>
+        <div class="inputContainer"><label class="inputLabel" for="stKey">API key</label><input is="emby-input" id="stKey" type="password" autocomplete="new-password"><div id="stKeyHint" class="fieldDescription"></div></div>
+        <label class="emby-checkbox-label"><input is="emby-checkbox" type="checkbox" id="stClearKey"><span>Remove this provider’s saved key</span></label>
+        <div class="inputContainer" id="stEndpointWrap" style="margin-top:1em"><label class="inputLabel" for="stEndpoint">API base URL</label><input is="emby-input" id="stEndpoint" type="url"><div class="fieldDescription">For Ollama on this Docker host: http://host.docker.internal:11434. Your Ollama server must accept connections from Docker.</div></div>
+        <div class="selectContainer"><label class="selectLabel" for="stModel">Model</label><select is="emby-select" id="stModel"></select></div>
+        <div class="inputContainer" id="stCustomWrap" hidden><label class="inputLabel" for="stCustomModel">Custom model ID</label><input is="emby-input" id="stCustomModel"></div>
+        <p id="stModelsHint" class="fieldDescription" aria-live="polite"></p>
+        <button is="emby-button" type="button" id="stRefreshModels" class="raised">Refresh models</button>
+        <button is="emby-button" type="submit" class="raised button-submit">Save settings</button>
+      </form>
+    </details>
+    <h2>New translation</h2>
+    <form id="stSearchForm" style="display:flex;gap:.7em;align-items:center"><input is="emby-input" id="stSearch" aria-label="Search movies and episodes" placeholder="Search a movie or episode" required style="flex:1"><button is="emby-button" class="raised" type="submit">Search</button></form>
+    <div class="selectContainer" style="margin-top:1em"><label class="selectLabel" for="stItem">Movie or episode</label><select is="emby-select" id="stItem"><option value="">Search to select a video</option></select></div>
+    <div class="selectContainer"><label class="selectLabel" for="stTrack">Source subtitle</label><select is="emby-select" id="stTrack"><option value="">Select a video first</option></select><div class="fieldDescription">Embedded and external text subtitles are supported. Image-based PGS/VobSub tracks require OCR and are excluded.</div></div>
+    <div class="selectContainer"><label class="selectLabel" for="stTarget">Translate into</label><select is="emby-select" id="stTarget"></select></div>
+    <button is="emby-button" class="raised button-submit" id="stStart" type="button" disabled>Start translation</button>
+    <p class="fieldDescription">Cloud providers bill your API account. Nothing is translated until you start a job. Each completed batch is saved so failed or interrupted jobs can resume.</p>
+    <p id="stMessage" role="status" aria-live="polite" style="white-space:pre-wrap"></p>
+    <h2>Translation jobs</h2>
+    <button is="emby-button" class="raised" id="stRefreshJobs" type="button">Refresh jobs</button>
+    <div id="stJobs" aria-live="polite"></div>
+  </div></div>
+<script>
+(function () {
+  'use strict';
+  const page = document.querySelector('#subtitleTranslatorPage');
+  const $ = id => page.querySelector('#' + id);
+  let settings, selectedItem, timer, loadingJobs = false, loadingTrack = false, modelGeneration = 0;
+  function message(text, bad) { $('stMessage').textContent = text; $('stMessage').style.color = bad ? '#ff9696' : ''; }
+  async function request(path, method, body, dataType) {
+    const options = {type: method || 'GET', url: ApiClient.getUrl(path), dataType: dataType || 'json'};
+    if (body !== undefined) { options.data = JSON.stringify(body); options.contentType = 'application/json'; }
+    try { return await ApiClient.ajax(options); }
+    catch (e) {
+      let text = 'Request failed. Check the server connection and try again.';
+      try { text = (await e.json()).error || text; } catch (_) { if (e.status) text += ' HTTP ' + e.status; }
+      throw new Error(text);
+    }
+  }
+  const api = (path, method, data) => request('SubtitleTranslator/' + path, method, data);
+  function option(select, value, label) { const el = document.createElement('option'); el.value = value; el.textContent = label; select.appendChild(el); }
+  function modelValue() { return $('stModel').value === '__custom' ? $('stCustomModel').value.trim() : $('stModel').value; }
+  function setModels(models, current) {
+    $('stModel').replaceChildren();
+    Array.from(new Set(models.concat(current ? [current] : []))).sort().forEach(m => option($('stModel'), m, m));
+    option($('stModel'), '__custom', 'Other — enter model ID');
+    $('stModel').value = current || (models[0] || '__custom');
+    $('stCustomWrap').hidden = $('stModel').value !== '__custom';
+  }
+  async function loadModels() {
+    const provider = $('stProvider').value, generation = ++modelGeneration;
+    $('stModelsHint').textContent = 'Loading model list…';
+    try {
+      const result = await api('Models?provider=' + encodeURIComponent(provider));
+      if (generation !== modelGeneration || provider !== $('stProvider').value) return;
+      const current = modelValue(); setModels(result.models, current);
+      $('stModelsHint').textContent = result.message;
+    } catch (e) { if (generation === modelGeneration) $('stModelsHint').textContent = e.message; }
+  }
+  function showProvider() {
+    const cfg = settings.providers[$('stProvider').value];
+    $('stKey').value = ''; $('stClearKey').checked = false;
+    $('stKeyHint').textContent = cfg.has_key ? 'A key is saved. Leave blank to keep it; saved keys are never shown.' : (cfg.key_required ? 'Enter your provider API key.' : 'Optional for this provider.');
+    $('stEndpoint').value = cfg.base_url;
+    $('stEndpointWrap').hidden = !['ollama', 'custom'].includes($('stProvider').value);
+    setModels(cfg.model ? [cfg.model] : [], cfg.model);
+    loadModels();
+  }
+  async function saveSettings() {
+    const provider = $('stProvider').value;
+    const result = await api('Settings', 'PUT', {provider: provider, model: modelValue(),
+      base_url: $('stEndpoint').value.trim(), api_key: $('stKey').value.trim(), clear_key: $('stClearKey').checked});
+    settings = result; $('stKey').value = ''; $('stClearKey').checked = false;
+    $('stKeyHint').textContent = result.providers[provider].has_key ? 'Key saved securely on the server. Leave blank to keep it.' : 'No API key saved for this provider.';
+    message('Settings saved.');
+  }
+  async function selectItem() {
+    const id = $('stItem').value; selectedItem = null; $('stStart').disabled = true; $('stTrack').replaceChildren();
+    if (!id) return;
+    loadingTrack = true;
+    try {
+      const item = await ApiClient.getItem(ApiClient.getCurrentUserId(), id);
+      if (id !== $('stItem').value) return;
+      selectedItem = item;
+      const streams = item.MediaStreams || (item.MediaSources && item.MediaSources[0] && item.MediaSources[0].MediaStreams) || [];
+      streams.filter(s => s.Type === 'Subtitle' && s.IsTextSubtitleStream !== false && !['pgssub', 'dvdsub', 'hdmv_pgs_subtitle', 'dvb_subtitle', 'xsub'].includes(s.Codec)).forEach(s => {
+        option($('stTrack'), String(s.Index), (s.DisplayTitle || s.Title || s.Language || 'Unknown language') + ' — ' + s.Codec + (s.IsExternal ? ' (external)' : ' (embedded)'));
+      });
+      if (!$('stTrack').options.length) { option($('stTrack'), '', 'No text subtitle tracks found'); message('This video needs an existing text subtitle to translate. Download/upload one first, or OCR image subtitles.'); }
+      $('stStart').disabled = !$('stTrack').value;
+    } catch (e) { message(e.message, true); }
+    finally { loadingTrack = false; }
+  }
+  async function start() {
+    if (!selectedItem || loadingTrack) return;
+    $('stStart').disabled = true;
+    try {
+      const item = selectedItem, track = Number($('stTrack').value), target = $('stTarget').value;
+      message('Loading source subtitle…');
+      const mediaSource = (item.MediaSources && item.MediaSources[0] && item.MediaSources[0].Id) || item.Id;
+      const srt = await request('Videos/' + item.Id + '/' + mediaSource + '/Subtitles/' + track + '/Stream.srt', 'GET', undefined, 'text');
+      const cues = (srt.match(/\d+:\d{2}:\d{2}[,.]\d{3}\s+-->/g) || []).length;
+      if (!cues) throw new Error('Jellyfin did not return a valid SRT subtitle.');
+      if (!window.confirm('Translate ' + cues + ' subtitle cues into ' + $('stTarget').selectedOptions[0].textContent + ' using ' + settings.providers[settings.provider].label + ' (' + settings.providers[settings.provider].model + ')? Cloud API usage is billed to your account.')) { message('Translation not started.'); return; }
+      const streams = item.MediaStreams || [];
+      const source = streams.find(s => s.Index === track);
+      const job = await api('Jobs', 'POST', {item_id: item.Id, stream_index: track, title: item.SeriesName ? item.SeriesName + ' — ' + item.Name : item.Name,
+          source: source && source.Language || 'auto-detect', target: target, srt: srt});
+      message('Job ' + (job.state === 'completed' ? 'already translated; use Save to library below.' : 'queued. You can close this page; progress is saved.'));
+      await refreshJobs();
+    } catch (e) { message(e.message, true); }
+    finally { $('stStart').disabled = !$('stTrack').value; }
+  }
+  function utf8Base64(text) {
+    const bytes = new TextEncoder().encode(text); let binary = '';
+    for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+    return btoa(binary);
+  }
+  async function saveToLibrary(job) {
+    const item = await ApiClient.getItem(ApiClient.getCurrentUserId(), job.item_id);
+    const streams = item.MediaStreams || [];
+    const targetLanguage = job.target.split('-')[0];
+    if (streams.some(s => s.Type === 'Subtitle' && [job.target.toLowerCase(), targetLanguage, targetLanguage === 'pt' ? 'por' : targetLanguage].includes((s.Language || '').toLowerCase()))) {
+      if (!window.confirm('This video already has a subtitle in the target language. Saving may replace an existing external subtitle for that language. Continue?')) return;
+    }
+    const result = await api('Jobs/' + job.id + '/Subtitle');
+    await request('Videos/' + job.item_id + '/Subtitles', 'POST', {Language: result.target, Format: 'srt', IsForced: false, IsHearingImpaired: false, Data: utf8Base64(result.srt)}, 'text');
+    await api('Jobs/' + job.id + '/Saved', 'POST', {});
+    message('Translated subtitle saved to the library. Jellyfin will refresh its subtitle tracks.');
+    if (selectedItem && selectedItem.Id.replace(/-/g, '') === job.item_id.replace(/-/g, '')) await selectItem();
+  }
+  function button(parent, label, fn) {
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'raised emby-button'; b.textContent = label; b.style.margin = '.3em .5em .3em 0';
+    b.addEventListener('click', async () => { b.disabled = true; try { await fn(); await refreshJobs(); } catch (e) { message(e.message, true); } finally { b.disabled = false; } }); parent.appendChild(b);
+  }
+  async function refreshJobs() {
+    if (loadingJobs) return; loadingJobs = true;
+    try {
+      const jobs = await api('Jobs'); $('stJobs').replaceChildren();
+      if (!jobs.length) { const p = document.createElement('p'); p.textContent = 'No translation jobs yet.'; $('stJobs').appendChild(p); }
+      jobs.forEach(job => {
+        const card = document.createElement('section'); card.style.cssText = 'padding:1em 0;border-bottom:1px solid #555';
+        const title = document.createElement('h3'); title.textContent = job.title; card.appendChild(title);
+        const info = document.createElement('p'); info.textContent = job.target + ' · ' + job.provider + ' / ' + job.model + ' · ' + job.state + (job.saved ? ' · saved to library' : '') + ' · ' + job.completed + '/' + job.total + ' cues · ' + (job.input_tokens + job.output_tokens) + ' tokens reported'; card.appendChild(info);
+        const progress = document.createElement('progress'); progress.max = job.total; progress.value = job.completed; progress.style.width = '100%'; card.appendChild(progress);
+        if (job.error) { const error = document.createElement('p'); error.textContent = job.error; error.style.color = '#ff9696'; card.appendChild(error); }
+        if (['running', 'queued'].includes(job.state)) button(card, 'Cancel', () => api('Jobs/' + job.id + '/Cancel', 'POST', {}));
+        if (['failed', 'paused', 'cancelled'].includes(job.state)) button(card, 'Resume / retry', () => { if (window.confirm('Resume this translation? Remaining API requests may incur charges.')) return api('Jobs/' + job.id + '/Retry', 'POST', {}); });
+        if (job.state === 'completed') {
+          if (!job.saved) button(card, 'Save to library', () => saveToLibrary(job));
+          button(card, 'Download SRT', async () => { const result = await api('Jobs/' + job.id + '/Subtitle'); const url = URL.createObjectURL(new Blob([result.srt], {type: 'application/x-subrip;charset=utf-8'})); const a = document.createElement('a'); a.href = url; a.download = job.title.replace(/[\\/:*?"<>|]/g, '_') + '.' + job.target + '.srt'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); });
+        }
+        $('stJobs').appendChild(card);
+      });
+    } finally { loadingJobs = false; }
+  }
+  $('stProvider').addEventListener('change', showProvider);
+  $('stModel').addEventListener('change', () => { $('stCustomWrap').hidden = $('stModel').value !== '__custom'; });
+  $('stSettings').addEventListener('submit', async e => { e.preventDefault(); try { await saveSettings(); await loadModels(); } catch (error) { message(error.message, true); } });
+  $('stRefreshModels').addEventListener('click', async () => { try { await saveSettings(); await loadModels(); } catch (e) { message(e.message, true); } });
+  $('stSearchForm').addEventListener('submit', async e => { e.preventDefault(); try {
+    const r = await ApiClient.getItems(ApiClient.getCurrentUserId(), {SearchTerm: $('stSearch').value.trim(), Recursive: true, IncludeItemTypes: 'Movie,Episode', Fields: 'MediaStreams,MediaSources', Limit: 40});
+    $('stItem').replaceChildren(); option($('stItem'), '', r.Items.length ? 'Select a video' : 'No matching videos');
+    r.Items.forEach(i => option($('stItem'), i.Id, (i.SeriesName ? i.SeriesName + ' — ' : '') + i.Name + (i.ProductionYear ? ' (' + i.ProductionYear + ')' : '')));
+    selectedItem = null; $('stTrack').replaceChildren(); option($('stTrack'), '', 'Select a video first'); $('stStart').disabled = true;
+  } catch (error) { message(error.message, true); } });
+  $('stItem').addEventListener('change', selectItem);
+  $('stStart').addEventListener('click', start);
+  $('stRefreshJobs').addEventListener('click', () => refreshJobs().catch(e => message(e.message, true)));
+  page.addEventListener('pageshow', async () => {
+    clearInterval(timer);
+    try {
+      settings = await api('Settings'); $('stProvider').replaceChildren();
+      Object.entries(settings.providers).forEach(([key, cfg]) => option($('stProvider'), key, cfg.label)); $('stProvider').value = settings.provider;
+      $('stTarget').replaceChildren(); Object.entries(settings.languages).forEach(([key, name]) => option($('stTarget'), key, name)); $('stTarget').value = 'pt-BR';
+      showProvider(); await refreshJobs(); timer = setInterval(() => refreshJobs().catch(e => message(e.message, true)), 5000);
+    } catch (e) { message(e.message, true); }
+  });
+  page.addEventListener('pagehide', () => { clearInterval(timer); ++modelGeneration; });
+}());
+</script>
+</div></body></html>

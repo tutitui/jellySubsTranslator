@@ -1,0 +1,27 @@
+services:
+  subtitle-translator:
+    image: local/jelly-subs-translator:1.0.0
+    build: ./worker
+    container_name: subtitle-translator
+    env_file:
+      - ./runtime/bridge.env
+    volumes:
+      - ./runtime:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    mem_limit: 256m
+    networks:
+      - jellyfin
+
+networks:
+  jellyfin:
+    external: true
+    name: ${JELLYFIN_DOCKER_NETWORK:-docker_default}

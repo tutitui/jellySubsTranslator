@@ -1,0 +1,25 @@
+const {chromium}=require('playwright-core');const fs=require('fs');const path=require('path');const root=path.resolve(__dirname,'..');
+(async()=>{const browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});const page=await browser.newPage();page.setDefaultTimeout(15000);fs.mkdirSync(path.join(root,'artifacts'),{recursive:true});
+await page.goto('http://127.0.0.1:18096/web/');await page.locator('#txtManualName').waitFor();await page.fill('#txtManualName','translator-integration');await page.fill('#txtManualPassword',JSON.parse(fs.readFileSync(path.join(root,'integration/test-auth.json'))).password);await page.getByRole('button',{name:'Sign In',exact:true}).click();await page.waitForTimeout(1500);
+const data=await page.evaluate(async()=>ApiClient.getItems(ApiClient.getCurrentUserId(),{Recursive:true,IncludeItemTypes:'Movie',Limit:1}));const id=data.Items[0].Id;
+await page.goto('http://127.0.0.1:18096/web/#/details?id='+id);await page.waitForTimeout(1500);await page.locator('.btnMoreCommands').first().click();await page.waitForTimeout(300);
+await page.getByText('Edit subtitles',{exact:true}).click();await page.waitForTimeout(700);await page.locator('.jst-open-translate').waitFor();
+await page.locator('.jst-open-translate').click();
+await page.locator('.jst-subtitle-row').first().waitFor();
+console.log('TRANSLATION ROWS:',await page.locator('.jst-subtitle-row strong').allTextContents());
+const row=page.locator('.jst-subtitle-row').first();
+await row.locator('select').selectOption('es');
+let posted;
+await page.route('**/SubtitleTranslator/Jobs',async route=>{
+ if(route.request().method()!=='POST')return route.continue();
+ posted=route.request().postDataJSON();
+ await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({id:'a1111111-1111-1111-1111-111111111111',state:'queued',target:posted.target,total:2,completed:0,saved:false,error:''})});
+});
+page.on('dialog',dialog=>dialog.accept());
+await row.getByRole('button',{name:'Translate',exact:true}).click();
+await page.waitForFunction(()=>document.querySelector('.jst-translation-panel [role=status]').textContent.includes('Translation started'));
+if(!posted||posted.target!=='es'||!posted.srt.includes('Hello, friend.'))throw new Error('Wrong source or language submitted');
+if(!(await row.getByRole('button',{name:'Translate',exact:true}).isDisabled()))throw new Error('Active translation button should remain disabled');
+console.log('Translation click submits selected source and language; job status is shown. No paid call made.');
+await page.screenshot({path:path.join(root,'artifacts/movie-editor.png'),fullPage:true});
+await browser.close();})().catch(e=>{console.error(e.message);process.exit(1)});
