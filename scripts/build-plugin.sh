@@ -11,7 +11,7 @@ else
 fi
 cleanup() { if [[ "$cleanup_container" == true ]]; then docker rm "$source_container" >/dev/null; fi; }
 trap cleanup EXIT
-for assembly in MediaBrowser.Common MediaBrowser.Model; do
+for assembly in MediaBrowser.Common MediaBrowser.Model MediaBrowser.Controller; do
     docker cp "$source_container:/usr/lib/jellyfin/bin/$assembly.dll" "$project_root/refs/$assembly.dll"
 done
 docker run --rm --user "$(id -u):$(id -g)" \

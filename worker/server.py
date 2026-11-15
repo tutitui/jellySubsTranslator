@@ -41,6 +41,10 @@ def init():
             base_url TEXT NOT NULL, input_srt TEXT NOT NULL, total INTEGER NOT NULL, progress TEXT NOT NULL DEFAULT '{}',
             error TEXT NOT NULL DEFAULT '', input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
             saved INTEGER NOT NULL DEFAULT 0)''')
+        columns = {r[1] for r in c.execute('PRAGMA table_info(jobs)')}
+        for name, declaration in [('source_file_id', "TEXT NOT NULL DEFAULT ''"), ('auto_save', 'INTEGER NOT NULL DEFAULT 0')]:
+            if name not in columns:
+                c.execute(f'ALTER TABLE jobs ADD COLUMN {name} {declaration}')
         # A restart pauses work rather than silently starting paid requests again.
         c.execute("UPDATE jobs SET state='paused', error='Service restarted. Retry to resume saved progress.' WHERE state IN ('running','queued','cancelling')")
     os.chmod(DATA / 'jobs.db', 0o600)
@@ -149,7 +153,10 @@ def create_job(body):
     if target not in LANGUAGES:
         raise ValueError('Select a target language.')
     source = str(body.get('source') or 'auto-detect')[:80]
-    stream = body.get('stream_index')
+    source_file_id = str(body.get('source_file_id') or '')
+    if source_file_id and not re.fullmatch(r'[0-9a-f]{64}', source_file_id):
+        raise ValueError('Invalid subtitle file identifier.')
+    stream = body.get('stream_index', 0 if source_file_id else None)
     if type(stream) is not int or stream < 0:
         raise ValueError('Select a subtitle track.')
     title = str(body.get('title', 'Subtitle'))[:300]
@@ -160,17 +167,20 @@ def create_job(body):
     model = cfg.get('model') or PROVIDERS[provider]['model']
     base = cfg.get('base_url') or PROVIDERS[provider]['base_url']
     ProviderTranslator(provider, cfg.get('api_key', ''), model, base)
-    fingerprint = hashlib.sha256(json.dumps([text, item, stream, target, source, provider, model, base]).encode()).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps([text, item, source_file_id or stream, target, source, provider, model, base]).encode()).hexdigest()
     now = time.time(); ident = str(uuid.uuid4())
     with closing(connect()) as c, c:
         found = c.execute('SELECT * FROM jobs WHERE fingerprint=?', (fingerprint,)).fetchone()
         if found:
+            if body.get('auto_save') is True:
+                c.execute("UPDATE jobs SET auto_save=1,error=CASE WHEN state='completed' THEN '' ELSE error END WHERE id=?", (found['id'],))
+                found = c.execute('SELECT * FROM jobs WHERE id=?', (found['id'],)).fetchone()
             return job_public(found)
         if c.execute("SELECT count(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0] >= 10:
             raise ValueError('Queue is full (10 active jobs). Wait for a job to finish.')
         c.execute('''INSERT INTO jobs (id,fingerprint,created,updated,state,title,item_id,stream_index,target,source,
-            provider,model,base_url,input_srt,total) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-            (ident, fingerprint, now, now, 'queued', title, item, stream, target, source, provider, model, base, text, len(cues)))
+            provider,model,base_url,input_srt,total,source_file_id,auto_save) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (ident, fingerprint, now, now, 'queued', title, item, stream, target, source, provider, model, base, text, len(cues), source_file_id, int(body.get('auto_save') is True)))
     WAKE.set()
     return job_public(get_job(ident))
 
@@ -181,8 +191,10 @@ def action(ident, name):
             c.execute("UPDATE jobs SET state=CASE WHEN state='running' THEN 'cancelling' ELSE 'cancelled' END, updated=? WHERE id=? AND state IN ('queued','running')", (time.time(), ident))
         elif name == 'retry':
             c.execute("UPDATE jobs SET state='queued',error='',updated=? WHERE id=? AND state IN ('failed','cancelled','paused')", (time.time(), ident)); WAKE.set()
+        elif name == 'save-error':
+            c.execute("UPDATE jobs SET error='Could not save the translated subtitle. Check media-folder permissions, then click Translate to retry saving.',updated=? WHERE id=? AND state='completed'", (time.time(), ident))
         elif name == 'saved':
-            c.execute("UPDATE jobs SET saved=1,updated=? WHERE id=? AND state='completed'", (time.time(), ident))
+            c.execute("UPDATE jobs SET saved=1,error='',updated=? WHERE id=? AND state='completed'", (time.time(), ident))
         else:
             raise ValueError('Unknown job action.')
     return job_public(get_job(ident))
@@ -254,7 +266,7 @@ class Handler(BaseHTTPRequestHandler):
             elif route == '/jobs' and self.command == 'GET':
                 with closing(connect()) as c:
                     result = [job_public(r) for r in c.execute('SELECT * FROM jobs ORDER BY created DESC LIMIT 100')]
-            elif re.fullmatch(r'/jobs/[0-9a-f-]{36}/(cancel|retry|saved|subtitle)', route):
+            elif re.fullmatch(r'/jobs/[0-9a-f-]{36}/(cancel|retry|saved|save-error|subtitle)', route):
                 _, _, ident, name = route.split('/')
                 if name == 'subtitle' and self.command == 'GET':
                     row = get_job(ident)

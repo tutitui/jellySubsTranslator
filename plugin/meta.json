@@ -6,8 +6,9 @@
   "overview": "Manage resumable AI subtitle translation jobs inside Jellyfin.",
   "owner": "Local",
   "targetAbi": "12.4.0.0",
-  "version": "1.0.0.0",
+  "version": "1.1.0.0",
   "status": "Active",
   "autoUpdate": false,
-  "assemblies": []
+  "assemblies": [],
+  "changelog": "Simplify movie translation rows; scan actual folder subtitle files; detect filename languages; automatically save completed folder translations."
 }
